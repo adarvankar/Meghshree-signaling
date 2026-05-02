@@ -21,10 +21,14 @@ const PORT = process.env.PORT || 3000;
 // Active sessions: sessionId -> { tech: socketId, client: socketId }
 const sessions = new Map();
 
-// Serve browser client (customer opens this - no download needed!)
-app.use(express.static(path.join(__dirname, 'public')));
-
 app.get('/health', (req, res) => res.json({ status: 'ok', sessions: sessions.size }));
+
+// Serve a simple session ID generator page (optional helper)
+app.get('/', (req, res) => res.send(`
+  <h2>Meghshree Remote - Signaling Server</h2>
+  <p>Active sessions: ${sessions.size}</p>
+  <p>Status: Running on port ${PORT}</p>
+`));
 
 io.on('connection', (socket) => {
   console.log(`[+] Connected: ${socket.id}`);
@@ -39,14 +43,6 @@ io.on('connection', (socket) => {
     socket.role = 'tech';
     console.log(`[Session] Created: ${sessionId} by tech ${socket.id}`);
     socket.emit('session-created', { sessionId });
-  });
-
-  socket.on('close-session', ({ sessionId }) => {
-    if (sessions.has(sessionId)) {
-      socket.to(sessionId).emit('peer-disconnected', { role: 'tech' });
-      sessions.delete(sessionId);
-      console.log(`[Session] Closed by tech: ${sessionId}`);
-    }
   });
 
   // Client joins using the 6-digit session code
@@ -87,35 +83,35 @@ io.on('connection', (socket) => {
 
   // ─── Chat ─────────────────────────────────────────────────────────────────
 
-  socket.on('chat-message', ({ sessionId, message, sender, timestamp }) => {
-    // Relay to other party using sender's local timestamp
-    socket.to(sessionId).emit('chat-message', { message, sender, timestamp });
+  socket.on('chat-message', ({ sessionId, message, sender }) => {
+    const timestamp = new Date().toLocaleTimeString();
+    io.to(sessionId).emit('chat-message', { message, sender, timestamp });
   });
 
   // ─── Remote Commands (Technician → Client) ────────────────────────────────
 
-  // Mouse move / click
+  // Mouse move / click — send to CLIENT (session.tech = create-session caller = customer's PC)
   socket.on('remote-mouse', ({ sessionId, x, y, type, button }) => {
     const session = sessions.get(sessionId);
-    if (session?.client) {
-      io.to(session.client).emit('remote-mouse', { x, y, type, button });
+    if (session?.tech) {
+      io.to(session.tech).emit('remote-mouse', { x, y, type, button });
     }
   });
 
-  // Keyboard input
+  // Keyboard input — send to CLIENT
   socket.on('remote-key', ({ sessionId, key, type }) => {
     const session = sessions.get(sessionId);
-    if (session?.client) {
-      io.to(session.client).emit('remote-key', { key, type });
+    if (session?.tech) {
+      io.to(session.tech).emit('remote-key', { key, type });
     }
   });
 
-  // Special commands: restart, ctrl-alt-del, lock screen
+  // Special commands — send to CLIENT
   socket.on('remote-command', ({ sessionId, command }) => {
     const session = sessions.get(sessionId);
-    if (session?.client) {
+    if (session?.tech) {
       console.log(`[Command] ${command} → session ${sessionId}`);
-      io.to(session.client).emit('remote-command', { command });
+      io.to(session.tech).emit('remote-command', { command });
     }
   });
 
