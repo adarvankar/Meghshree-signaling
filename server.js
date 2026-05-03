@@ -1,159 +1,51 @@
-/**
- * Meghshree Remote - Signaling Server
- * Deploy this on Render (repo: adarvankar/Meghshree-signaling)
- *
- * Session roles:
- *   session.tech   = customer's browser socket (called create-session)
- *   session.client = technician's app socket   (called join-session)
- *
- * Control commands flow: technician → server → session.tech (customer PC)
- */
 
 const express = require('express');
-const http    = require('http');
-const { Server } = require('socket.io');
-const path    = require('path');
+const WebSocket = require('ws');
+const cors = require('cors');
 
-const app    = express();
-const server = http.createServer(app);
-const io     = new Server(server, {
-  cors: { origin: '*' },
-  maxHttpBufferSize: 50 * 1024 * 1024, // 50 MB for file chunks
-});
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-
-// Active sessions: sessionId → { tech: socketId, client: socketId }
-const sessions = new Map();
-
-// ─── Static / Health ─────────────────────────────────────────────────────────
-app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('/health', (_req, res) =>
-  res.json({ status: 'ok', sessions: sessions.size })
+const server = app.listen(process.env.PORT || 3000, () =>
+  console.log("Server running")
 );
 
-// ─── Socket.IO ───────────────────────────────────────────────────────────────
-io.on('connection', (socket) => {
-  console.log(`[+] Connected: ${socket.id}`);
+const wss = new WebSocket.Server({ server });
 
-  // ── Session Management ───────────────────────────────────────────────────
+let devices = {};
+let clients = {};
+let pairing = {};
 
-  // Customer's browser calls this → stored as session.tech
-  socket.on('create-session', ({ sessionId }) => {
-    sessions.set(sessionId, { tech: socket.id, client: null });
-    socket.join(sessionId);
-    socket.sessionId = sessionId;
-    socket.role      = 'tech';
-    console.log(`[Session] Created: ${sessionId} by customer ${socket.id}`);
-    socket.emit('session-created', { sessionId });
-  });
+function genCode(){
+  return Math.floor(100000 + Math.random()*900000).toString();
+}
 
-  // Technician app calls this → stored as session.client
-  socket.on('join-session', ({ sessionId }) => {
-    const session = sessions.get(sessionId);
-    if (!session) {
-      socket.emit('error', { message: 'Invalid session code. Ask the customer to refresh.' });
-      return;
+wss.on('connection', ws => {
+
+  ws.on('message', msg => {
+    let data = JSON.parse(msg);
+
+    if(data.type === "register-device"){
+      devices[data.id] = ws;
+      let code = genCode();
+      pairing[code] = data.id;
+      ws.send(JSON.stringify({type:"pair-code", code}));
     }
-    if (session.client) {
-      socket.emit('error', { message: 'Session already has a connected technician.' });
-      return;
+
+    if(data.type === "pair"){
+      let dev = pairing[data.code];
+      if(dev && devices[dev]){
+        clients[data.client] = ws;
+        ws.send(JSON.stringify({type:"paired", device:dev}));
+      }
     }
-    session.client  = socket.id;
-    socket.join(sessionId);
-    socket.sessionId = sessionId;
-    socket.role      = 'client';
-    console.log(`[Session] Tech ${socket.id} joined session ${sessionId}`);
 
-    // Tell customer that tech has connected
-    io.to(session.tech).emit('client-connected', { sessionId });
-    socket.emit('session-joined', { sessionId });
-  });
-
-  // ── WebRTC Signaling ─────────────────────────────────────────────────────
-
-  socket.on('webrtc-offer', ({ sessionId, offer }) => {
-    socket.to(sessionId).emit('webrtc-offer', { offer });
-  });
-
-  socket.on('webrtc-answer', ({ sessionId, answer }) => {
-    socket.to(sessionId).emit('webrtc-answer', { answer });
-  });
-
-  socket.on('webrtc-ice-candidate', ({ sessionId, candidate }) => {
-    socket.to(sessionId).emit('webrtc-ice-candidate', { candidate });
-  });
-
-  // ── Chat ─────────────────────────────────────────────────────────────────
-
-  socket.on('chat-message', ({ sessionId, message, sender, timestamp }) => {
-    const ts = timestamp || new Date().toLocaleTimeString();
-    io.to(sessionId).emit('chat-message', { message, sender, timestamp: ts });
-  });
-
-  // ── Remote Control: Technician → Customer PC ─────────────────────────────
-  // session.tech holds the CUSTOMER's socket id (they called create-session)
-
-  socket.on('remote-mouse', ({ sessionId, x, y, type, button }) => {
-    const session = sessions.get(sessionId);
-    if (session?.tech) {
-      io.to(session.tech).emit('remote-mouse', { x, y, type, button });
+    if(data.type === "control"){
+      let dev = devices[data.target];
+      if(dev) dev.send(JSON.stringify(data));
     }
+
   });
 
-  socket.on('remote-key', ({ sessionId, key, type }) => {
-    const session = sessions.get(sessionId);
-    if (session?.tech) {
-      io.to(session.tech).emit('remote-key', { key, type });
-    }
-  });
-
-  socket.on('remote-command', ({ sessionId, command }) => {
-    const session = sessions.get(sessionId);
-    if (session?.tech) {
-      console.log(`[Command] ${command} → session ${sessionId}`);
-      io.to(session.tech).emit('remote-command', { command });
-    }
-  });
-
-  // ── File Transfer: Technician → Customer ─────────────────────────────────
-
-  socket.on('file-transfer-start', ({ sessionId, fileName, fileSize, totalChunks }) => {
-    socket.to(sessionId).emit('file-transfer-start', { fileName, fileSize, totalChunks });
-  });
-
-  socket.on('file-chunk', ({ sessionId, chunk, fileName, chunkIndex, totalChunks }) => {
-    socket.to(sessionId).emit('file-chunk', { chunk, fileName, chunkIndex, totalChunks });
-  });
-
-  socket.on('file-transfer-complete', ({ sessionId, fileName }) => {
-    socket.to(sessionId).emit('file-transfer-complete', { fileName });
-  });
-
-  // ── Disconnect ────────────────────────────────────────────────────────────
-
-  socket.on('disconnect', () => {
-    const { sessionId, role } = socket;
-    if (!sessionId || !sessions.has(sessionId)) return;
-
-    console.log(`[-] Disconnected: ${socket.id} (${role}) from session ${sessionId}`);
-    socket.to(sessionId).emit('peer-disconnected', { role });
-
-    if (role === 'tech') {
-      // Customer left — close session entirely
-      sessions.delete(sessionId);
-      console.log(`[Session] Closed: ${sessionId}`);
-    } else if (role === 'client') {
-      // Technician left — session stays so customer doesn't have to refresh
-      const session = sessions.get(sessionId);
-      if (session) session.client = null;
-    }
-  });
-});
-
-// ─── Start ───────────────────────────────────────────────────────────────────
-server.listen(PORT, () => {
-  console.log(`\n✅ Meghshree Remote Signaling Server running on port ${PORT}`);
-  console.log(`   Health: http://localhost:${PORT}/health\n`);
 });
