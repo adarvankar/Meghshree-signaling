@@ -1,0 +1,44 @@
+[build]
+  publish = "."
+  command = "echo 'No build needed — static site'"
+
+# Route all /room/* paths to index.html (SPA routing)
+[[redirects]]
+  from = "/room/*"
+  to   = "/index.html"
+  status = 200
+
+# Route offline page
+[[redirects]]
+  from = "/offline"
+  to   = "/offline.html"
+  status = 200
+
+# Security & PWA headers
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options         = "DENY"
+    X-Content-Type-Options  = "nosniff"
+    Referrer-Policy         = "strict-origin-when-cross-origin"
+    Permissions-Policy      = "camera=*, microphone=*, display-capture=*"
+
+# Service worker — must not be cached
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control           = "no-cache, no-store, must-revalidate"
+    Service-Worker-Allowed  = "/"
+
+# Manifest
+[[headers]]
+  for = "/manifest.json"
+  [headers.values]
+    Content-Type = "application/manifest+json"
+    Cache-Control = "public, max-age=86400"
+
+# Icons — long cache
+[[headers]]
+  for = "/icons/*"
+  [headers.values]
+    Cache-Control = "public, max-age=2592000"
